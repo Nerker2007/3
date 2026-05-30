@@ -17,11 +17,11 @@
 // === 引脚定义 ===
 #define X_STEP_PIN    26
 #define X_DIR_PIN     16
-#define X_LIMIT_PIN   5
+#define X_LIMIT_PIN   13  // 与FluidNC配置一致
 
 #define Y_STEP_PIN    25
 #define Y_DIR_PIN     27
-#define Y_LIMIT_PIN   13
+#define Y_LIMIT_PIN   5   // 与FluidNC配置一致
 
 #define Z_STEP_PIN    17
 #define Z_DIR_PIN     14
@@ -49,10 +49,10 @@
 #define Z_MIN_POS     95.0
 #define Z_MAX_POS     195.0
 
-// 方向反转
-#define X_DIR_INVERT  false
-#define Y_DIR_INVERT  true
-#define Z_DIR_INVERT  true
+// 方向反转 (与FluidNC配置一致: X有:low后缀需要反转，Y/Z不需要)
+#define X_DIR_INVERT  true
+#define Y_DIR_INVERT  false
+#define Z_DIR_INVERT  false
 
 // === 步进电机对象 ===
 AccelStepper stepperX(AccelStepper::DRIVER, X_STEP_PIN, X_DIR_PIN);
