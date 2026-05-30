@@ -41,9 +41,14 @@
 #define Y_MAX_TRAVEL  195.0
 #define Z_MAX_TRAVEL  100.0
 
-// 归零后坐标 (195 - pulloff = 192)
-#define HOME_POS_XY   192.0
-#define HOME_POS_Z    192.0
+// 归零后坐标 = 限位所在端 ± pulloff(停在距限位3mm处)
+// 步进方向是固定映射，三轴归零方向不同 -> 限位在坐标的不同端：
+//   X: homeDir=+1, 限位在高端 -> home = 行程上限 - pulloff (远离限位=往0走)
+//   Y: homeDir=-1, 限位在低端0  -> home = 0  + pulloff      (远离限位=往195走)
+//   Z: homeDir=-1, 限位在低端95 -> home = 95 + pulloff      (远离限位=往195走)
+#define HOME_POS_X    192.0   // 195 - 3
+#define HOME_POS_Y    3.0     // 0  + 3
+#define HOME_POS_Z    98.0    // 95 + 3
 
 // Z可动范围
 #define Z_MIN_POS     95.0
@@ -64,6 +69,8 @@ bool absoluteMode = true;   // G90绝对 / G91相对
 bool isHomed = false;
 bool motorsEnabled = true;
 unsigned long lastLimitTime = 0;  // 限位冷却时间戳
+
+#define LIMIT_DEBUG 0  // 1=输出移动/限位调试日志；定位完已改回0
 
 float currentX = 0, currentY = 0, currentZ = 0;  // 当前坐标(mm)
 float feedRate = 1000.0;  // 默认进给速度 mm/min
@@ -274,7 +281,7 @@ void homeAll() {
     Serial.println("Error: Z homing failed");
     goto reattach;
   }
-  // 归零后设置当前位置=192mm（限位在195，回退了3mm）
+  // Z限位在低端(物理上方)，归零后停在 95+3=98；S向下可一直走到195
   stepperZ.setCurrentPosition(mmToSteps(HOME_POS_Z));
   currentZ = HOME_POS_Z;
 
@@ -283,16 +290,18 @@ void homeAll() {
     Serial.println("Error: X homing failed");
     goto reattach;
   }
-  stepperX.setCurrentPosition(mmToSteps(HOME_POS_XY));
-  currentX = HOME_POS_XY;
+  // X限位在高端，归零后停在 195-3=192；A反向可一直走到0
+  stepperX.setCurrentPosition(mmToSteps(HOME_POS_X));
+  currentX = HOME_POS_X;
 
   // Y归零：负步数方向=往后=限位方向
   if (!homeAxis(stepperY, Y_LIMIT_PIN, Y_MAX_TRAVEL, 'Y', -1)) {
     Serial.println("Error: Y homing failed");
     goto reattach;
   }
-  stepperY.setCurrentPosition(mmToSteps(HOME_POS_XY));
-  currentY = HOME_POS_XY;
+  // Y限位在低端0，归零后停在 0+3=3；D反向可一直走到195
+  stepperY.setCurrentPosition(mmToSteps(HOME_POS_Y));
+  currentY = HOME_POS_Y;
 
   isHomed = true;
   Serial.println("ok Homing complete");
@@ -304,15 +313,91 @@ reattach:
   attachInterrupt(Z_LIMIT_PIN, onZLimit, FALLING);
 }
 
+// === 限位公共操作（供 moveTo3D / loop / serviceLimit 复用，避免重复）===
+void detachLimits() {
+  detachInterrupt(X_LIMIT_PIN);
+  detachInterrupt(Y_LIMIT_PIN);
+  detachInterrupt(Z_LIMIT_PIN);
+}
+
+void reattachLimits() {
+  attachInterrupt(X_LIMIT_PIN, onXLimit, FALLING);
+  attachInterrupt(Y_LIMIT_PIN, onYLimit, FALLING);
+  attachInterrupt(Z_LIMIT_PIN, onZLimit, FALLING);
+}
+
+// 停下全部电机并等待减速到位
+void stopAllSteppers() {
+  stepperX.stop();
+  stepperY.stop();
+  stepperZ.stop();
+  while (stepperX.distanceToGo() != 0 ||
+         stepperY.distanceToGo() != 0 ||
+         stepperZ.distanceToGo() != 0) {
+    stepperX.run();
+    stepperY.run();
+    stepperZ.run();
+    yield();
+  }
+}
+
+// 已确认 limitAxis 为真实触发：报警 + 回退3mm + 更新坐标。
+// 末尾延时让限位引脚抖动稳定，调用方随后再重新挂载中断。
+void pullbackFromLimit() {
+  Serial.print("ALARM: Limit hit on ");
+  Serial.println(limitAxis);
+
+  long pullback = mmToSteps(3.0);
+  if (limitAxis == 'X') {
+    stepperX.move(-pullback);  // X限位在正方向，回退负方向
+    while (stepperX.distanceToGo() != 0) { stepperX.run(); yield(); }
+  } else if (limitAxis == 'Y') {
+    stepperY.move(pullback);   // Y限位在负方向，回退正方向
+    while (stepperY.distanceToGo() != 0) { stepperY.run(); yield(); }
+  } else if (limitAxis == 'Z') {
+    stepperZ.move(pullback);   // Z限位在负方向(上方)，回退正方向(下方)
+    while (stepperZ.distanceToGo() != 0) { stepperZ.run(); yield(); }
+  }
+
+  limitHit = false;
+  lastLimitTime = millis();
+  currentX = stepsToMm(stepperX.currentPosition());
+  currentY = stepsToMm(stepperY.currentPosition());
+  currentZ = stepsToMm(stepperZ.currentPosition());
+  delay(200);  // 等限位引脚抖动稳定
+}
+
+// === 限位响应（loop 静止时用）===
+// 中断置位后先停稳电机消除运动干扰，再确认是否真实触发。
+// 返回 true 表示真实限位已处理；false 表示噪声/串扰已忽略。
+bool serviceLimit() {
+  int axisPin = (limitAxis == 'X') ? X_LIMIT_PIN :
+                (limitAxis == 'Y') ? Y_LIMIT_PIN :
+                (limitAxis == 'Z') ? Z_LIMIT_PIN : -1;
+
+  detachLimits();      // 禁用中断，防止确认/回退期间再次触发
+  stopAllSteppers();   // 先停稳，消除电机运动产生的电磁干扰再读引脚
+
+  // 停稳后若引脚回到HIGH，说明只是运动串扰/瞬时噪声，忽略
+  if (axisPin < 0 || !confirmLimit(axisPin)) {
+    limitHit = false;
+    reattachLimits();
+    return false;
+  }
+
+  pullbackFromLimit();
+  reattachLimits();
+  return true;
+}
+
 // === 移动执行 ===
 void moveTo3D(float targetX, float targetY, float targetZ, float speed_mm_min) {
-  // 软限位检查（未归零时不约束Z下限，避免启动后Z强制跳到95）
-  targetX = constrain(targetX, 0, X_MAX_TRAVEL);
-  targetY = constrain(targetY, 0, Y_MAX_TRAVEL);
+  // 软限位：仅归零后启用(有坐标基准)。未归零时自由点动(双向均可)，靠物理限位保护，
+  // 避免未归零时currentZ=0导致W(Z-)被constrain到0而完全不动。
   if (isHomed) {
+    targetX = constrain(targetX, 0, X_MAX_TRAVEL);
+    targetY = constrain(targetY, 0, Y_MAX_TRAVEL);
     targetZ = constrain(targetZ, Z_MIN_POS, Z_MAX_POS);
-  } else {
-    targetZ = constrain(targetZ, 0, Z_MAX_POS);
   }
 
   long stepsX = mmToSteps(targetX);
@@ -329,59 +414,61 @@ void moveTo3D(float targetX, float targetY, float targetZ, float speed_mm_min) {
   stepperY.moveTo(stepsY);
   stepperZ.moveTo(stepsZ);
 
+  // 运动期间禁用限位中断，改为只轮询"正在运动的轴"。
+  // 原因：中断会被任意引脚的电磁串扰误触发(曾出现X运动却报Z并回退Z)。
+  // 轮询只看正在动的轴，静止轴即使被串扰也不参与判断，从根上杜绝误判轴。
+  // 与 homeAxis() 归零时的检测策略一致。
+  detachLimits();
+
+#if LIMIT_DEBUG
+  Serial.print("[move] tgt X="); Serial.print(targetX, 2);
+  Serial.print(" Y="); Serial.print(targetY, 2);
+  Serial.print(" Z="); Serial.print(targetZ, 2);
+  Serial.print(" | dtg X="); Serial.print(stepperX.distanceToGo());
+  Serial.print(" Y="); Serial.print(stepperY.distanceToGo());
+  Serial.print(" Z="); Serial.print(stepperZ.distanceToGo());
+  Serial.print(" | lim(1=open) X="); Serial.print(digitalRead(X_LIMIT_PIN));
+  Serial.print(" Y="); Serial.print(digitalRead(Y_LIMIT_PIN));
+  Serial.print(" Z="); Serial.println(digitalRead(Z_LIMIT_PIN));
+#endif
+
   // 运行直到全部到位
   while (stepperX.distanceToGo() != 0 ||
          stepperY.distanceToGo() != 0 ||
          stepperZ.distanceToGo() != 0) {
 
-    // 限位保护
-    if (limitHit) {
-      // 禁用中断防止回退时再次触发
-      detachInterrupt(X_LIMIT_PIN);
-      detachInterrupt(Y_LIMIT_PIN);
-      detachInterrupt(Z_LIMIT_PIN);
+    // 只检测正在运动的轴，读到LOW不立即下结论
+    int hitPin = -1;
+    char hitAxis = ' ';
+    if (stepperX.distanceToGo() != 0 && digitalRead(X_LIMIT_PIN) == LOW) {
+      hitPin = X_LIMIT_PIN; hitAxis = 'X';
+    } else if (stepperY.distanceToGo() != 0 && digitalRead(Y_LIMIT_PIN) == LOW) {
+      hitPin = Y_LIMIT_PIN; hitAxis = 'Y';
+    } else if (stepperZ.distanceToGo() != 0 && digitalRead(Z_LIMIT_PIN) == LOW) {
+      hitPin = Z_LIMIT_PIN; hitAxis = 'Z';
+    }
 
-      stepperX.stop();
-      stepperY.stop();
-      stepperZ.stop();
-      // 等待减速停止
-      while (stepperX.distanceToGo() != 0 ||
-             stepperY.distanceToGo() != 0 ||
-             stepperZ.distanceToGo() != 0) {
-        stepperX.run();
-        stepperY.run();
-        stepperZ.run();
-        yield();
+    // 读到LOW先在运动中去抖：电机运行会在限位线(尤其Z的GPIO23)耦合出瞬时LOW尖峰，
+    // 必须像homeAxis那样先confirmLimit滤掉尖峰，否则Z一起步就被自身干扰误停。
+    if (hitPin >= 0 && confirmLimit(hitPin)) {
+#if LIMIT_DEBUG
+      Serial.print("[limit] moving LOW confirmed, axis="); Serial.println(hitAxis);
+#endif
+      // 持续LOW：停稳消除运动干扰后二次确认。仍LOW=真撞限位；回到HIGH=持续运动串扰
+      stopAllSteppers();
+      bool stillLow = confirmLimit(hitPin);
+#if LIMIT_DEBUG
+      Serial.print("[limit] after-stop=");
+      Serial.println(stillLow ? "LOW (real -> pullback)" : "HIGH (noise -> break)");
+#endif
+      if (stillLow) {
+        limitAxis = hitAxis;
+        pullbackFromLimit();
+        reattachLimits();
+        Serial.println("ok");
+        return;
       }
-      Serial.print("ALARM: Limit hit on ");
-      Serial.println(limitAxis);
-
-      // 回退3mm（远离限位方向）
-      long pullback = mmToSteps(3.0);
-      if (limitAxis == 'X') {
-        stepperX.move(-pullback);  // X限位在正方向，回退负方向
-        while (stepperX.distanceToGo() != 0) { stepperX.run(); yield(); }
-      } else if (limitAxis == 'Y') {
-        stepperY.move(pullback);   // Y限位在负方向，回退正方向
-        while (stepperY.distanceToGo() != 0) { stepperY.run(); yield(); }
-      } else if (limitAxis == 'Z') {
-        stepperZ.move(pullback);   // Z限位在负方向(上方)，回退正方向(下方)
-        while (stepperZ.distanceToGo() != 0) { stepperZ.run(); yield(); }
-      }
-
-      limitHit = false;
-      lastLimitTime = millis();
-      currentX = stepsToMm(stepperX.currentPosition());
-      currentY = stepsToMm(stepperY.currentPosition());
-      currentZ = stepsToMm(stepperZ.currentPosition());
-
-      // 等待稳定后重新挂载中断
-      delay(200);
-      attachInterrupt(X_LIMIT_PIN, onXLimit, FALLING);
-      attachInterrupt(Y_LIMIT_PIN, onYLimit, FALLING);
-      attachInterrupt(Z_LIMIT_PIN, onZLimit, FALLING);
-      Serial.println("ok");
-      return;
+      break;  // 持续运动串扰：电机已停，本次移动到此结束
     }
 
     stepperX.run();
@@ -390,10 +477,19 @@ void moveTo3D(float targetX, float targetY, float targetZ, float speed_mm_min) {
     yield();
   }
 
+  // 恢复中断（供静止时检测意外触发）
+  reattachLimits();
+
   // 更新当前坐标
   currentX = stepsToMm(stepperX.currentPosition());
   currentY = stepsToMm(stepperY.currentPosition());
   currentZ = stepsToMm(stepperZ.currentPosition());
+
+#if LIMIT_DEBUG
+  Serial.print("[done] pos X="); Serial.print(currentX, 2);
+  Serial.print(" Y="); Serial.print(currentY, 2);
+  Serial.print(" Z="); Serial.println(currentZ, 2);
+#endif
 
   Serial.println("ok");
 }
@@ -657,51 +753,10 @@ void loop() {
     }
   }
 
-  // 限位保护（2秒冷却防止重复触发死循环）
+  // 限位保护（2秒冷却防止重复触发死循环；serviceLimit内部去抖确认排除噪声）
   if (limitHit && (millis() - lastLimitTime > 2000)) {
-    // 禁用中断防止回退过程中再次触发
-    detachInterrupt(X_LIMIT_PIN);
-    detachInterrupt(Y_LIMIT_PIN);
-    detachInterrupt(Z_LIMIT_PIN);
-
-    stepperX.stop();
-    stepperY.stop();
-    stepperZ.stop();
-    while (stepperX.distanceToGo() != 0 ||
-           stepperY.distanceToGo() != 0 ||
-           stepperZ.distanceToGo() != 0) {
-      stepperX.run();
-      stepperY.run();
-      stepperZ.run();
-      yield();
-    }
-    Serial.print("ALARM: Limit hit on ");
-    Serial.println(limitAxis);
-
-    long pullback = mmToSteps(3.0);
-    if (limitAxis == 'X') {
-      stepperX.move(-pullback);
-      while (stepperX.distanceToGo() != 0) { stepperX.run(); yield(); }
-    } else if (limitAxis == 'Y') {
-      stepperY.move(pullback);
-      while (stepperY.distanceToGo() != 0) { stepperY.run(); yield(); }
-    } else if (limitAxis == 'Z') {
-      stepperZ.move(pullback);
-      while (stepperZ.distanceToGo() != 0) { stepperZ.run(); yield(); }
-    }
-
-    limitHit = false;
-    lastLimitTime = millis();
-    currentX = stepsToMm(stepperX.currentPosition());
-    currentY = stepsToMm(stepperY.currentPosition());
-    currentZ = stepsToMm(stepperZ.currentPosition());
-
-    // 等200ms让限位引脚稳定后再重新挂载中断
-    delay(200);
-    attachInterrupt(X_LIMIT_PIN, onXLimit, FALLING);
-    attachInterrupt(Y_LIMIT_PIN, onYLimit, FALLING);
-    attachInterrupt(Z_LIMIT_PIN, onZLimit, FALLING);
-  } else if (limitHit && (millis() - lastLimitTime <= 2000)) {
+    serviceLimit();
+  } else if (limitHit) {
     // 冷却期间忽略限位信号
     limitHit = false;
   }

@@ -1,9 +1,9 @@
 """
 ESP32 三轴步进滑台 键盘点动控制
-按键映射：
-  W/S - Z轴 +/-
-  A/Q - X轴 +/-
-  D/E - Y轴 +/-
+按键映射（方向以"归零方向"为基准）：
+  W/S - Z轴 归零方向/反向
+  Q/A - X轴 归零方向/反向
+  E/D - Y轴 归零方向/反向
 每次移动5mm，速度F100
 ESC - 退出
 H - 归零
@@ -78,16 +78,12 @@ def print_help():
     print("\n=== 三轴步进滑台 键盘点动 ===")
     print(f"步距: {STEP_MM}mm | 速度: F{FEED_RATE}")
     print("─────────────────────────────")
-    print("  W - Z轴 上移(+)")
-    print("  S - Z轴 下移(-)")
-    print("  Q - X轴 负方向(-)")
-    print("  A - X轴 正方向(+)")
-    print("  E - Y轴 负方向(-)")
-    print("  D - Y轴 正方向(+)")
+    print("  W - Z轴 归零方向(上)    S - 反向(下)")
+    print("  Q - X轴 归零方向        A - 反向")
+    print("  E - Y轴 归零方向        D - 反向")
     print("─────────────────────────────")
     print("  H - 归零($H)")
     print("  ? - 查询状态")
-    print("  0 - 移动到原点(0,0,95)")
     print("  ESC/Ctrl+C - 退出")
     print("═════════════════════════════\n")
 
@@ -158,23 +154,23 @@ def main():
             desc = ""
 
             if key == 'w':
-                cmd = f"G1 Z{STEP_MM} F{FEED_RATE}"
-                desc = f"Z+ {STEP_MM}mm"
+                cmd = f"G1 Z-{STEP_MM} F{FEED_RATE}"   # 与Z归零同方向(物理向上)
+                desc = f"Z 归零向 {STEP_MM}mm"
             elif key == 's':
-                cmd = f"G1 Z-{STEP_MM} F{FEED_RATE}"
-                desc = f"Z- {STEP_MM}mm"
-            elif key == 'a':
-                cmd = f"G1 X{STEP_MM} F{FEED_RATE}"
-                desc = f"X+ {STEP_MM}mm"
+                cmd = f"G1 Z{STEP_MM} F{FEED_RATE}"     # 反向(向下)
+                desc = f"Z 反向 {STEP_MM}mm"
             elif key == 'q':
-                cmd = f"G1 X-{STEP_MM} F{FEED_RATE}"
-                desc = f"X- {STEP_MM}mm"
-            elif key == 'd':
-                cmd = f"G1 Y{STEP_MM} F{FEED_RATE}"
-                desc = f"Y+ {STEP_MM}mm"
+                cmd = f"G1 X{STEP_MM} F{FEED_RATE}"     # 与X归零同方向
+                desc = f"X 归零向 {STEP_MM}mm"
+            elif key == 'a':
+                cmd = f"G1 X-{STEP_MM} F{FEED_RATE}"    # 反向
+                desc = f"X 反向 {STEP_MM}mm"
             elif key == 'e':
-                cmd = f"G1 Y-{STEP_MM} F{FEED_RATE}"
-                desc = f"Y- {STEP_MM}mm"
+                cmd = f"G1 Y-{STEP_MM} F{FEED_RATE}"    # 与Y归零同方向
+                desc = f"Y 归零向 {STEP_MM}mm"
+            elif key == 'd':
+                cmd = f"G1 Y{STEP_MM} F{FEED_RATE}"     # 反向
+                desc = f"Y 反向 {STEP_MM}mm"
             elif key == 'h':
                 print("\r> 归零中...")
                 # 切回绝对模式归零，再切回相对
@@ -187,13 +183,14 @@ def main():
                 resp = send_gcode(ser, "?")
                 print(f"\r< {resp}")
                 continue
-            elif key == '0':
-                # 移动到原点
-                send_gcode(ser, "G90")
-                resp = send_gcode(ser, f"G0 X0 Y0 Z95")
-                print(f"\r> 移动到原点: {resp}")
-                send_gcode(ser, "G91")
-                continue
+            # '0' 回原点已禁用：修正坐标系后 Y0/Z95 正好在限位处，会撞限位。
+            # 如需恢复，请改成远离限位的安全坐标(如 X100 Y100 Z145)再启用。
+            # elif key == '0':
+            #     send_gcode(ser, "G90")
+            #     resp = send_gcode(ser, f"G0 X100 Y100 Z145")
+            #     print(f"\r> 移动到原点: {resp}")
+            #     send_gcode(ser, "G91")
+            #     continue
             elif key == '\x1b' or key == '\x03':  # ESC or Ctrl+C
                 print("\r退出...")
                 break
