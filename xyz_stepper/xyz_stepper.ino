@@ -142,13 +142,14 @@ void waitStop(AccelStepper &stepper) {
   }
 }
 
-bool homeAxis(AccelStepper &stepper, int limitPin, float maxTravel, char axisName) {
-  // setPinsInverted() 已处理方向反转，库层面正步数=物理正方向
-  // 限位开关在正方向末端(+max)，归零=向正方向移动直到触发限位
+bool homeAxis(AccelStepper &stepper, int limitPin, float maxTravel, char axisName, int homeDir) {
+  // homeDir: +1=正步数方向找限位, -1=负步数方向找限位
   Serial.print("[Homing ");
   Serial.print(axisName);
   Serial.print("] limit_pin=");
   Serial.print(limitPin);
+  Serial.print(" dir=");
+  Serial.print(homeDir);
   Serial.print(" state=");
   Serial.println(digitalRead(limitPin) == LOW ? "TRIGGERED" : "open");
 
@@ -157,11 +158,11 @@ bool homeAxis(AccelStepper &stepper, int limitPin, float maxTravel, char axisNam
 
   stepper.setAcceleration(getAccel());
 
-  // 如果限位已经触发，先回退
+  // 如果限位已经触发，先回退(反方向)
   if (confirmLimit(limitPin)) {
     Serial.println("  Limit already triggered, backing off...");
     stepper.setMaxSpeed(feedSpeed);
-    stepper.move(-mmToSteps(PULLOFF_MM + 5));
+    stepper.move(-homeDir * mmToSteps(PULLOFF_MM + 5));
     waitStop(stepper);
     delay(100);
     if (confirmLimit(limitPin)) {
@@ -170,9 +171,9 @@ bool homeAxis(AccelStepper &stepper, int limitPin, float maxTravel, char axisNam
     }
   }
 
-  // === 第一次：快速向正方向寻找限位 ===
+  // === 第一次：快速向限位方向寻找 ===
   stepper.setMaxSpeed(seekSpeed);
-  long seekDist = mmToSteps(maxTravel + 10);
+  long seekDist = homeDir * mmToSteps(maxTravel + 10);
   stepper.move(seekDist);
 
   while (true) {
@@ -193,15 +194,15 @@ bool homeAxis(AccelStepper &stepper, int limitPin, float maxTravel, char axisNam
   waitStop(stepper);
   delay(100);
 
-  // === 回退一段距离(负方向=远离限位) ===
+  // === 回退一段距离(反方向=远离限位) ===
   stepper.setMaxSpeed(seekSpeed);
-  stepper.move(-mmToSteps(PULLOFF_MM + 2));
+  stepper.move(-homeDir * mmToSteps(PULLOFF_MM + 2));
   waitStop(stepper);
   delay(100);
 
   // === 第二次：慢速精确寻找 ===
   stepper.setMaxSpeed(feedSpeed);
-  stepper.move(mmToSteps(PULLOFF_MM + 5));
+  stepper.move(homeDir * mmToSteps(PULLOFF_MM + 5));
 
   while (true) {
     stepper.run();
@@ -222,7 +223,7 @@ bool homeAxis(AccelStepper &stepper, int limitPin, float maxTravel, char axisNam
 
   // === 最终回退 pulloff 距离 ===
   stepper.setMaxSpeed(feedSpeed);
-  stepper.move(-mmToSteps(PULLOFF_MM));
+  stepper.move(-homeDir * mmToSteps(PULLOFF_MM));
   waitStop(stepper);
 
   Serial.print(axisName);
@@ -239,8 +240,8 @@ void homeAll() {
   detachInterrupt(Y_LIMIT_PIN);
   detachInterrupt(Z_LIMIT_PIN);
 
-  // Z先归零（行程100mm，但从任意位置出发可能需要走更远）
-  if (!homeAxis(stepperZ, Z_LIMIT_PIN, Z_MAX_TRAVEL + 95, 'Z')) {
+  // Z先归零：负步数方向=物理向上=限位方向
+  if (!homeAxis(stepperZ, Z_LIMIT_PIN, Z_MAX_TRAVEL + 95, 'Z', -1)) {
     Serial.println("Error: Z homing failed");
     goto reattach;
   }
@@ -248,16 +249,16 @@ void homeAll() {
   stepperZ.setCurrentPosition(mmToSteps(HOME_POS_Z));
   currentZ = HOME_POS_Z;
 
-  // X归零
-  if (!homeAxis(stepperX, X_LIMIT_PIN, X_MAX_TRAVEL, 'X')) {
+  // X归零：正步数方向=限位方向
+  if (!homeAxis(stepperX, X_LIMIT_PIN, X_MAX_TRAVEL, 'X', 1)) {
     Serial.println("Error: X homing failed");
     goto reattach;
   }
   stepperX.setCurrentPosition(mmToSteps(HOME_POS_XY));
   currentX = HOME_POS_XY;
 
-  // Y归零
-  if (!homeAxis(stepperY, Y_LIMIT_PIN, Y_MAX_TRAVEL, 'Y')) {
+  // Y归零：正步数方向=限位方向
+  if (!homeAxis(stepperY, Y_LIMIT_PIN, Y_MAX_TRAVEL, 'Y', 1)) {
     Serial.println("Error: Y homing failed");
     goto reattach;
   }
