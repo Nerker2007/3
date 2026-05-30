@@ -284,8 +284,8 @@ void homeAll() {
   stepperX.setCurrentPosition(mmToSteps(HOME_POS_XY));
   currentX = HOME_POS_XY;
 
-  // Y归零：正步数方向=限位方向
-  if (!homeAxis(stepperY, Y_LIMIT_PIN, Y_MAX_TRAVEL, 'Y', 1)) {
+  // Y归零：负步数方向=往后=限位方向
+  if (!homeAxis(stepperY, Y_LIMIT_PIN, Y_MAX_TRAVEL, 'Y', -1)) {
     Serial.println("Error: Y homing failed");
     goto reattach;
   }
