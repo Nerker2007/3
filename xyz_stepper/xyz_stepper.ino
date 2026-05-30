@@ -350,21 +350,29 @@ void moveTo3D(float targetX, float targetY, float targetZ, float speed_mm_min) {
       Serial.print("ALARM: Limit hit on ");
       Serial.println(limitAxis);
 
-      // 回退3mm（负方向=远离限位）
+      // 回退3mm（远离限位方向）
+      // X限位在正方向(homeDir=+1)，回退负方向
+      // Y限位在负方向(homeDir=-1)，回退正方向
+      // Z限位在负方向(homeDir=-1)，回退正方向
       long pullback = mmToSteps(3.0);
       if (limitAxis == 'X') {
-        stepperX.move(-pullback);
+        stepperX.move(-pullback);  // X限位在正方向，回退负方向
         while (stepperX.distanceToGo() != 0) { stepperX.run(); yield(); }
       } else if (limitAxis == 'Y') {
-        stepperY.move(-pullback);
+        stepperY.move(pullback);   // Y限位在负方向，回退正方向
         while (stepperY.distanceToGo() != 0) { stepperY.run(); yield(); }
       } else if (limitAxis == 'Z') {
-        stepperZ.move(-pullback);
+        stepperZ.move(pullback);   // Z限位在负方向(上方)，回退正方向(下方)
         while (stepperZ.distanceToGo() != 0) { stepperZ.run(); yield(); }
       }
 
       limitHit = false;
-      break;
+      // 更新坐标
+      currentX = stepsToMm(stepperX.currentPosition());
+      currentY = stepsToMm(stepperY.currentPosition());
+      currentZ = stepsToMm(stepperZ.currentPosition());
+      Serial.println("ok");
+      return;
     }
 
     stepperX.run();
@@ -634,6 +642,39 @@ void loop() {
     } else {
       inputBuffer += c;
     }
+  }
+
+  // 限位保护（任何时候触发都立即停止+回退）
+  if (limitHit) {
+    stepperX.stop();
+    stepperY.stop();
+    stepperZ.stop();
+    while (stepperX.distanceToGo() != 0 ||
+           stepperY.distanceToGo() != 0 ||
+           stepperZ.distanceToGo() != 0) {
+      stepperX.run();
+      stepperY.run();
+      stepperZ.run();
+      yield();
+    }
+    Serial.print("ALARM: Limit hit on ");
+    Serial.println(limitAxis);
+
+    long pullback = mmToSteps(3.0);
+    if (limitAxis == 'X') {
+      stepperX.move(-pullback);
+      while (stepperX.distanceToGo() != 0) { stepperX.run(); yield(); }
+    } else if (limitAxis == 'Y') {
+      stepperY.move(pullback);
+      while (stepperY.distanceToGo() != 0) { stepperY.run(); yield(); }
+    } else if (limitAxis == 'Z') {
+      stepperZ.move(pullback);
+      while (stepperZ.distanceToGo() != 0) { stepperZ.run(); yield(); }
+    }
+    limitHit = false;
+    currentX = stepsToMm(stepperX.currentPosition());
+    currentY = stepsToMm(stepperY.currentPosition());
+    currentZ = stepsToMm(stepperZ.currentPosition());
   }
 
   // 持续运行步进电机（处理减速停止等）
