@@ -125,8 +125,9 @@ void IRAM_ATTR onZLimit() {
 }
 
 // === 归零 ===
-bool homeAxis(AccelStepper &stepper, int limitPin, bool dirInvert,
-              float maxTravel, char axisName) {
+bool homeAxis(AccelStepper &stepper, int limitPin, float maxTravel, char axisName) {
+  // setPinsInverted() 已处理方向反转，库层面正步数=物理正方向
+  // 限位开关在正方向末端(+max)，归零=向正方向移动直到触发限位
   Serial.print("[Homing ");
   Serial.print(axisName);
   Serial.println("]");
@@ -134,24 +135,14 @@ bool homeAxis(AccelStepper &stepper, int limitPin, bool dirInvert,
   float seekSpeed = HOMING_SPEED_MM_MIN / 60.0 * STEPS_PER_MM;
   float feedSpeed = HOMING_FEED_MM_MIN / 60.0 * STEPS_PER_MM;
 
-  // 正方向寻找限位
-  long seekSteps = mmToSteps(maxTravel + 10);
-  if (dirInvert) seekSteps = -seekSteps;  // 反转方向时物理正方向是负步数
-  // 修正：限位在正方向末端，需要向正方向移动
-  // dirInvert=false: 正方向=正步数
-  // dirInvert=true: 正方向=负步数（因为方向反转）
-
-  stepper.setMaxSpeed(seekSpeed);
   stepper.setAcceleration(getAccel());
 
-  // 第一次：快速寻找限位
-  stepper.move(dirInvert ? -seekSteps : seekSteps);
-  // 实际上：向物理正方向移动
-  long targetSteps = (long)(maxTravel * STEPS_PER_MM + 4000);
-  if (dirInvert) targetSteps = -targetSteps;
-  stepper.move(targetSteps);
+  // === 第一次：快速向正方向寻找限位 ===
+  stepper.setMaxSpeed(seekSpeed);
+  long seekDist = mmToSteps(maxTravel + 10);  // 正步数=向正方向(限位方向)
+  stepper.move(seekDist);
 
-  while (!digitalRead(limitPin) == LOW) {  // 等待限位触发
+  while (digitalRead(limitPin) != LOW) {  // 等待限位触发(低电平)
     stepper.run();
     if (stepper.distanceToGo() == 0) {
       Serial.print("Error: ");
@@ -164,20 +155,17 @@ bool homeAxis(AccelStepper &stepper, int limitPin, bool dirInvert,
   stepper.setCurrentPosition(stepper.currentPosition());
   delay(100);
 
-  // 回退一段距离
-  long pulloff = mmToSteps(PULLOFF_MM + 2);
-  if (dirInvert) pulloff = -pulloff;
-  stepper.move(-pulloff);  // 反方向回退
+  // === 回退一段距离(负方向=远离限位) ===
+  stepper.setMaxSpeed(seekSpeed);
+  stepper.move(-mmToSteps(PULLOFF_MM + 2));
   while (stepper.distanceToGo() != 0) {
     stepper.run();
   }
   delay(100);
 
-  // 第二次：慢速精确寻找
+  // === 第二次：慢速精确寻找 ===
   stepper.setMaxSpeed(feedSpeed);
-  long slowSeek = mmToSteps(PULLOFF_MM + 5);
-  if (dirInvert) slowSeek = -slowSeek;
-  stepper.move(slowSeek);
+  stepper.move(mmToSteps(PULLOFF_MM + 5));
 
   while (digitalRead(limitPin) != LOW) {
     stepper.run();
@@ -191,11 +179,9 @@ bool homeAxis(AccelStepper &stepper, int limitPin, bool dirInvert,
   stepper.stop();
   delay(50);
 
-  // 最终回退 pulloff 距离
-  long finalPulloff = mmToSteps(PULLOFF_MM);
-  if (dirInvert) finalPulloff = -finalPulloff;
+  // === 最终回退 pulloff 距离 ===
   stepper.setMaxSpeed(feedSpeed);
-  stepper.move(-finalPulloff);
+  stepper.move(-mmToSteps(PULLOFF_MM));
   while (stepper.distanceToGo() != 0) {
     stepper.run();
   }
@@ -214,28 +200,29 @@ void homeAll() {
   detachInterrupt(Y_LIMIT_PIN);
   detachInterrupt(Z_LIMIT_PIN);
 
-  // Z先归零
-  if (!homeAxis(stepperZ, Z_LIMIT_PIN, Z_DIR_INVERT, Z_MAX_TRAVEL + 95, 'Z')) {
+  // Z先归零（行程100mm，但从任意位置出发可能需要走更远）
+  if (!homeAxis(stepperZ, Z_LIMIT_PIN, Z_MAX_TRAVEL + 95, 'Z')) {
     Serial.println("Error: Z homing failed");
     goto reattach;
   }
-  stepperZ.setCurrentPosition(mmToSteps(HOME_POS_Z) * (Z_DIR_INVERT ? -1 : 1));
+  // 归零后设置当前位置=192mm（限位在195，回退了3mm）
+  stepperZ.setCurrentPosition(mmToSteps(HOME_POS_Z));
   currentZ = HOME_POS_Z;
 
   // X归零
-  if (!homeAxis(stepperX, X_LIMIT_PIN, X_DIR_INVERT, X_MAX_TRAVEL, 'X')) {
+  if (!homeAxis(stepperX, X_LIMIT_PIN, X_MAX_TRAVEL, 'X')) {
     Serial.println("Error: X homing failed");
     goto reattach;
   }
-  stepperX.setCurrentPosition(mmToSteps(HOME_POS_XY) * (X_DIR_INVERT ? -1 : 1));
+  stepperX.setCurrentPosition(mmToSteps(HOME_POS_XY));
   currentX = HOME_POS_XY;
 
   // Y归零
-  if (!homeAxis(stepperY, Y_LIMIT_PIN, Y_DIR_INVERT, Y_MAX_TRAVEL, 'Y')) {
+  if (!homeAxis(stepperY, Y_LIMIT_PIN, Y_MAX_TRAVEL, 'Y')) {
     Serial.println("Error: Y homing failed");
     goto reattach;
   }
-  stepperY.setCurrentPosition(mmToSteps(HOME_POS_XY) * (Y_DIR_INVERT ? -1 : 1));
+  stepperY.setCurrentPosition(mmToSteps(HOME_POS_XY));
   currentY = HOME_POS_XY;
 
   isHomed = true;
@@ -255,9 +242,9 @@ void moveTo3D(float targetX, float targetY, float targetZ, float speed_mm_min) {
   targetY = constrain(targetY, 0, Y_MAX_TRAVEL);
   targetZ = constrain(targetZ, Z_MIN_POS, Z_MAX_POS);
 
-  long stepsX = mmToSteps(targetX) * (X_DIR_INVERT ? -1 : 1);
-  long stepsY = mmToSteps(targetY) * (Y_DIR_INVERT ? -1 : 1);
-  long stepsZ = mmToSteps(targetZ) * (Z_DIR_INVERT ? -1 : 1);
+  long stepsX = mmToSteps(targetX);
+  long stepsY = mmToSteps(targetY);
+  long stepsZ = mmToSteps(targetZ);
 
   float speedSteps = feedToStepsPerSec(speed_mm_min);
 
@@ -290,16 +277,16 @@ void moveTo3D(float targetX, float targetY, float targetZ, float speed_mm_min) {
       Serial.print("ALARM: Limit hit on ");
       Serial.println(limitAxis);
 
-      // 回退3mm
+      // 回退3mm（负方向=远离限位）
       long pullback = mmToSteps(3.0);
       if (limitAxis == 'X') {
-        stepperX.move(X_DIR_INVERT ? pullback : -pullback);
+        stepperX.move(-pullback);
         while (stepperX.distanceToGo() != 0) stepperX.run();
       } else if (limitAxis == 'Y') {
-        stepperY.move(Y_DIR_INVERT ? pullback : -pullback);
+        stepperY.move(-pullback);
         while (stepperY.distanceToGo() != 0) stepperY.run();
       } else if (limitAxis == 'Z') {
-        stepperZ.move(Z_DIR_INVERT ? pullback : -pullback);
+        stepperZ.move(-pullback);
         while (stepperZ.distanceToGo() != 0) stepperZ.run();
       }
 
@@ -313,9 +300,9 @@ void moveTo3D(float targetX, float targetY, float targetZ, float speed_mm_min) {
   }
 
   // 更新当前坐标
-  currentX = stepsToMm(stepperX.currentPosition() * (X_DIR_INVERT ? -1 : 1));
-  currentY = stepsToMm(stepperY.currentPosition() * (Y_DIR_INVERT ? -1 : 1));
-  currentZ = stepsToMm(stepperZ.currentPosition() * (Z_DIR_INVERT ? -1 : 1));
+  currentX = stepsToMm(stepperX.currentPosition());
+  currentY = stepsToMm(stepperY.currentPosition());
+  currentZ = stepsToMm(stepperZ.currentPosition());
 
   Serial.println("ok");
 }
@@ -416,15 +403,15 @@ void processCommand(String line) {
       case 92: { // 设置当前坐标
         if (hasCode(line, 'X')) {
           currentX = parseValue(line, 'X', currentX);
-          stepperX.setCurrentPosition(mmToSteps(currentX) * (X_DIR_INVERT ? -1 : 1));
+          stepperX.setCurrentPosition(mmToSteps(currentX));
         }
         if (hasCode(line, 'Y')) {
           currentY = parseValue(line, 'Y', currentY);
-          stepperY.setCurrentPosition(mmToSteps(currentY) * (Y_DIR_INVERT ? -1 : 1));
+          stepperY.setCurrentPosition(mmToSteps(currentY));
         }
         if (hasCode(line, 'Z')) {
           currentZ = parseValue(line, 'Z', currentZ);
-          stepperZ.setCurrentPosition(mmToSteps(currentZ) * (Z_DIR_INVERT ? -1 : 1));
+          stepperZ.setCurrentPosition(mmToSteps(currentZ));
         }
         Serial.println("ok G92");
         break;
