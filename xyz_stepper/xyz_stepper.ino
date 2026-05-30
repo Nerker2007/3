@@ -63,6 +63,7 @@ AccelStepper stepperZ(AccelStepper::DRIVER, Z_STEP_PIN, Z_DIR_PIN);
 bool absoluteMode = true;   // G90绝对 / G91相对
 bool isHomed = false;
 bool motorsEnabled = true;
+unsigned long lastLimitTime = 0;  // 限位冷却时间戳
 
 float currentX = 0, currentY = 0, currentZ = 0;  // 当前坐标(mm)
 float feedRate = 1000.0;  // 默认进给速度 mm/min
@@ -335,6 +336,11 @@ void moveTo3D(float targetX, float targetY, float targetZ, float speed_mm_min) {
 
     // 限位保护
     if (limitHit) {
+      // 禁用中断防止回退时再次触发
+      detachInterrupt(X_LIMIT_PIN);
+      detachInterrupt(Y_LIMIT_PIN);
+      detachInterrupt(Z_LIMIT_PIN);
+
       stepperX.stop();
       stepperY.stop();
       stepperZ.stop();
@@ -351,9 +357,6 @@ void moveTo3D(float targetX, float targetY, float targetZ, float speed_mm_min) {
       Serial.println(limitAxis);
 
       // 回退3mm（远离限位方向）
-      // X限位在正方向(homeDir=+1)，回退负方向
-      // Y限位在负方向(homeDir=-1)，回退正方向
-      // Z限位在负方向(homeDir=-1)，回退正方向
       long pullback = mmToSteps(3.0);
       if (limitAxis == 'X') {
         stepperX.move(-pullback);  // X限位在正方向，回退负方向
@@ -367,10 +370,16 @@ void moveTo3D(float targetX, float targetY, float targetZ, float speed_mm_min) {
       }
 
       limitHit = false;
-      // 更新坐标
+      lastLimitTime = millis();
       currentX = stepsToMm(stepperX.currentPosition());
       currentY = stepsToMm(stepperY.currentPosition());
       currentZ = stepsToMm(stepperZ.currentPosition());
+
+      // 等待稳定后重新挂载中断
+      delay(200);
+      attachInterrupt(X_LIMIT_PIN, onXLimit, FALLING);
+      attachInterrupt(Y_LIMIT_PIN, onYLimit, FALLING);
+      attachInterrupt(Z_LIMIT_PIN, onZLimit, FALLING);
       Serial.println("ok");
       return;
     }
@@ -619,7 +628,10 @@ void setup() {
   stepperZ.setAcceleration(getAccel());
   stepperZ.setPinsInverted(Z_DIR_INVERT, false, false);
 
-  // 限位中断
+  // 限位中断（延迟挂载，避免启动时噪声触发）
+  delay(500);
+  limitHit = false;  // 清除启动期间可能的误触发
+  lastLimitTime = millis();  // 设置冷却起点，启动后2秒内不响应限位
   attachInterrupt(X_LIMIT_PIN, onXLimit, FALLING);
   attachInterrupt(Y_LIMIT_PIN, onYLimit, FALLING);
   attachInterrupt(Z_LIMIT_PIN, onZLimit, FALLING);
@@ -630,6 +642,7 @@ void setup() {
 }
 
 // === Loop ===
+
 void loop() {
   // 读取串口
   while (Serial.available()) {
@@ -644,8 +657,13 @@ void loop() {
     }
   }
 
-  // 限位保护（任何时候触发都立即停止+回退）
-  if (limitHit) {
+  // 限位保护（2秒冷却防止重复触发死循环）
+  if (limitHit && (millis() - lastLimitTime > 2000)) {
+    // 禁用中断防止回退过程中再次触发
+    detachInterrupt(X_LIMIT_PIN);
+    detachInterrupt(Y_LIMIT_PIN);
+    detachInterrupt(Z_LIMIT_PIN);
+
     stepperX.stop();
     stepperY.stop();
     stepperZ.stop();
@@ -671,10 +689,21 @@ void loop() {
       stepperZ.move(pullback);
       while (stepperZ.distanceToGo() != 0) { stepperZ.run(); yield(); }
     }
+
     limitHit = false;
+    lastLimitTime = millis();
     currentX = stepsToMm(stepperX.currentPosition());
     currentY = stepsToMm(stepperY.currentPosition());
     currentZ = stepsToMm(stepperZ.currentPosition());
+
+    // 等200ms让限位引脚稳定后再重新挂载中断
+    delay(200);
+    attachInterrupt(X_LIMIT_PIN, onXLimit, FALLING);
+    attachInterrupt(Y_LIMIT_PIN, onYLimit, FALLING);
+    attachInterrupt(Z_LIMIT_PIN, onZLimit, FALLING);
+  } else if (limitHit && (millis() - lastLimitTime <= 2000)) {
+    // 冷却期间忽略限位信号
+    limitHit = false;
   }
 
   // 持续运行步进电机（处理减速停止等）
