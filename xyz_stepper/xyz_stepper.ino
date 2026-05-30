@@ -126,13 +126,14 @@ void IRAM_ATTR onZLimit() {
 
 // === 归零 ===
 
-// 去抖确认限位：连续读3次LOW才算触发，间隔1ms
+// 去抖确认限位：5次读取中至少3次LOW即确认触发
 bool confirmLimit(int limitPin) {
-  for (int i = 0; i < 3; i++) {
-    if (digitalRead(limitPin) != LOW) return false;
-    delayMicroseconds(1000);
+  int lowCount = 0;
+  for (int i = 0; i < 5; i++) {
+    if (digitalRead(limitPin) == LOW) lowCount++;
+    delayMicroseconds(200);
   }
-  return true;
+  return (lowCount >= 3);
 }
 
 // 等待电机减速停止
@@ -176,17 +177,31 @@ bool homeAxis(AccelStepper &stepper, int limitPin, float maxTravel, char axisNam
   long seekDist = homeDir * mmToSteps(maxTravel + 10);
   stepper.move(seekDist);
 
-  while (true) {
-    stepper.run();
-    if (confirmLimit(limitPin)) {
-      Serial.println("  Seek: limit confirmed");
-      break;
-    }
-    if (stepper.distanceToGo() == 0) {
-      Serial.print("Error: ");
-      Serial.print(axisName);
-      Serial.println(" limit not found");
-      return false;
+  {
+    unsigned long lastPrint = 0;
+    while (true) {
+      stepper.run();
+      // 先快速检查，只有读到LOW才做去抖确认
+      if (digitalRead(limitPin) == LOW && confirmLimit(limitPin)) {
+        Serial.println("  Seek: limit confirmed");
+        break;
+      }
+      if (stepper.distanceToGo() == 0) {
+        Serial.print("Error: ");
+        Serial.print(axisName);
+        Serial.println(" limit not found");
+        return false;
+      }
+      // 每500ms打印一次限位状态
+      if (millis() - lastPrint > 500) {
+        lastPrint = millis();
+        Serial.print("  ");
+        Serial.print(axisName);
+        Serial.print(" pin");
+        Serial.print(limitPin);
+        Serial.print("=");
+        Serial.println(digitalRead(limitPin));
+      }
     }
   }
   // 减速停止
@@ -206,7 +221,7 @@ bool homeAxis(AccelStepper &stepper, int limitPin, float maxTravel, char axisNam
 
   while (true) {
     stepper.run();
-    if (confirmLimit(limitPin)) {
+    if (digitalRead(limitPin) == LOW && confirmLimit(limitPin)) {
       Serial.println("  Feed: limit confirmed");
       break;
     }
