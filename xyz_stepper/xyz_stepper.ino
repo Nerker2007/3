@@ -305,10 +305,14 @@ reattach:
 
 // === 移动执行 ===
 void moveTo3D(float targetX, float targetY, float targetZ, float speed_mm_min) {
-  // 限位检查
+  // 软限位检查（未归零时不约束Z下限，避免启动后Z强制跳到95）
   targetX = constrain(targetX, 0, X_MAX_TRAVEL);
   targetY = constrain(targetY, 0, Y_MAX_TRAVEL);
-  targetZ = constrain(targetZ, Z_MIN_POS, Z_MAX_POS);
+  if (isHomed) {
+    targetZ = constrain(targetZ, Z_MIN_POS, Z_MAX_POS);
+  } else {
+    targetZ = constrain(targetZ, 0, Z_MAX_POS);
+  }
 
   long stepsX = mmToSteps(targetX);
   long stepsY = mmToSteps(targetY);
