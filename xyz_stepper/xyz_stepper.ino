@@ -140,6 +140,7 @@ bool confirmLimit(int limitPin) {
 void waitStop(AccelStepper &stepper) {
   while (stepper.distanceToGo() != 0) {
     stepper.run();
+    yield();
   }
 }
 
@@ -340,6 +341,7 @@ void moveTo3D(float targetX, float targetY, float targetZ, float speed_mm_min) {
         stepperX.run();
         stepperY.run();
         stepperZ.run();
+        yield();
       }
       Serial.print("ALARM: Limit hit on ");
       Serial.println(limitAxis);
@@ -348,13 +350,13 @@ void moveTo3D(float targetX, float targetY, float targetZ, float speed_mm_min) {
       long pullback = mmToSteps(3.0);
       if (limitAxis == 'X') {
         stepperX.move(-pullback);
-        while (stepperX.distanceToGo() != 0) stepperX.run();
+        while (stepperX.distanceToGo() != 0) { stepperX.run(); yield(); }
       } else if (limitAxis == 'Y') {
         stepperY.move(-pullback);
-        while (stepperY.distanceToGo() != 0) stepperY.run();
+        while (stepperY.distanceToGo() != 0) { stepperY.run(); yield(); }
       } else if (limitAxis == 'Z') {
         stepperZ.move(-pullback);
-        while (stepperZ.distanceToGo() != 0) stepperZ.run();
+        while (stepperZ.distanceToGo() != 0) { stepperZ.run(); yield(); }
       }
 
       limitHit = false;
@@ -364,6 +366,7 @@ void moveTo3D(float targetX, float targetY, float targetZ, float speed_mm_min) {
     stepperX.run();
     stepperY.run();
     stepperZ.run();
+    yield();
   }
 
   // 更新当前坐标
@@ -453,21 +456,21 @@ void processCommand(String line) {
         Serial.println("mm (positive should go toward limit)");
         stepperX.setMaxSpeed(speed);
         stepperX.move(mmToSteps(testDist));
-        while (stepperX.distanceToGo() != 0) stepperX.run();
+        while (stepperX.distanceToGo() != 0) { stepperX.run(); yield(); }
       } else if (axis == 'Y' || axis == 'y') {
         Serial.print("Test Y move ");
         Serial.print(testDist);
         Serial.println("mm");
         stepperY.setMaxSpeed(speed);
         stepperY.move(mmToSteps(testDist));
-        while (stepperY.distanceToGo() != 0) stepperY.run();
+        while (stepperY.distanceToGo() != 0) { stepperY.run(); yield(); }
       } else if (axis == 'Z' || axis == 'z') {
         Serial.print("Test Z move ");
         Serial.print(testDist);
         Serial.println("mm (positive should go UP toward limit)");
         stepperZ.setMaxSpeed(speed);
         stepperZ.move(mmToSteps(testDist));
-        while (stepperZ.distanceToGo() != 0) stepperZ.run();
+        while (stepperZ.distanceToGo() != 0) { stepperZ.run(); yield(); }
       }
       Serial.println("Test done. Check limits again:");
       Serial.print("  X=");
