@@ -102,8 +102,11 @@ def main():
     print(f"连接到: {port}")
 
     try:
-        ser = serial.Serial(port, BAUD_RATE, timeout=1)
-        time.sleep(2)  # 等待ESP32重启
+        # dsrdtr=False, rtscts=False 防止DTR/RTS信号重启ESP32
+        ser = serial.Serial(port, BAUD_RATE, timeout=1, dsrdtr=False, rtscts=False)
+        ser.dtr = False
+        ser.rts = False
+        time.sleep(1)  # 等待连接稳定
 
         # 读取启动信息
         while ser.in_waiting:
