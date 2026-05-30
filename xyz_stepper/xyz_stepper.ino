@@ -50,7 +50,7 @@
 #define Z_MAX_POS     195.0
 
 // 方向反转 (与FluidNC配置一致: X有:low后缀需要反转，Y/Z不需要)
-#define X_DIR_INVERT  true
+#define X_DIR_INVERT  false
 #define Y_DIR_INVERT  false
 #define Z_DIR_INVERT  false
 
@@ -125,25 +125,62 @@ void IRAM_ATTR onZLimit() {
 }
 
 // === 归零 ===
+
+// 去抖确认限位：连续读3次LOW才算触发，间隔1ms
+bool confirmLimit(int limitPin) {
+  for (int i = 0; i < 3; i++) {
+    if (digitalRead(limitPin) != LOW) return false;
+    delayMicroseconds(1000);
+  }
+  return true;
+}
+
+// 等待电机减速停止
+void waitStop(AccelStepper &stepper) {
+  while (stepper.distanceToGo() != 0) {
+    stepper.run();
+  }
+}
+
 bool homeAxis(AccelStepper &stepper, int limitPin, float maxTravel, char axisName) {
   // setPinsInverted() 已处理方向反转，库层面正步数=物理正方向
   // 限位开关在正方向末端(+max)，归零=向正方向移动直到触发限位
   Serial.print("[Homing ");
   Serial.print(axisName);
-  Serial.println("]");
+  Serial.print("] limit_pin=");
+  Serial.print(limitPin);
+  Serial.print(" state=");
+  Serial.println(digitalRead(limitPin) == LOW ? "TRIGGERED" : "open");
 
   float seekSpeed = HOMING_SPEED_MM_MIN / 60.0 * STEPS_PER_MM;
   float feedSpeed = HOMING_FEED_MM_MIN / 60.0 * STEPS_PER_MM;
 
   stepper.setAcceleration(getAccel());
 
+  // 如果限位已经触发，先回退
+  if (confirmLimit(limitPin)) {
+    Serial.println("  Limit already triggered, backing off...");
+    stepper.setMaxSpeed(feedSpeed);
+    stepper.move(-mmToSteps(PULLOFF_MM + 5));
+    waitStop(stepper);
+    delay(100);
+    if (confirmLimit(limitPin)) {
+      Serial.println("  Error: still triggered after backoff");
+      return false;
+    }
+  }
+
   // === 第一次：快速向正方向寻找限位 ===
   stepper.setMaxSpeed(seekSpeed);
-  long seekDist = mmToSteps(maxTravel + 10);  // 正步数=向正方向(限位方向)
+  long seekDist = mmToSteps(maxTravel + 10);
   stepper.move(seekDist);
 
-  while (digitalRead(limitPin) != LOW) {  // 等待限位触发(低电平)
+  while (true) {
     stepper.run();
+    if (confirmLimit(limitPin)) {
+      Serial.println("  Seek: limit confirmed");
+      break;
+    }
     if (stepper.distanceToGo() == 0) {
       Serial.print("Error: ");
       Serial.print(axisName);
@@ -151,24 +188,27 @@ bool homeAxis(AccelStepper &stepper, int limitPin, float maxTravel, char axisNam
       return false;
     }
   }
+  // 减速停止
   stepper.stop();
-  stepper.setCurrentPosition(stepper.currentPosition());
+  waitStop(stepper);
   delay(100);
 
   // === 回退一段距离(负方向=远离限位) ===
   stepper.setMaxSpeed(seekSpeed);
   stepper.move(-mmToSteps(PULLOFF_MM + 2));
-  while (stepper.distanceToGo() != 0) {
-    stepper.run();
-  }
+  waitStop(stepper);
   delay(100);
 
   // === 第二次：慢速精确寻找 ===
   stepper.setMaxSpeed(feedSpeed);
   stepper.move(mmToSteps(PULLOFF_MM + 5));
 
-  while (digitalRead(limitPin) != LOW) {
+  while (true) {
     stepper.run();
+    if (confirmLimit(limitPin)) {
+      Serial.println("  Feed: limit confirmed");
+      break;
+    }
     if (stepper.distanceToGo() == 0) {
       Serial.print("Error: ");
       Serial.print(axisName);
@@ -177,14 +217,13 @@ bool homeAxis(AccelStepper &stepper, int limitPin, float maxTravel, char axisNam
     }
   }
   stepper.stop();
+  waitStop(stepper);
   delay(50);
 
   // === 最终回退 pulloff 距离 ===
   stepper.setMaxSpeed(feedSpeed);
   stepper.move(-mmToSteps(PULLOFF_MM));
-  while (stepper.distanceToGo() != 0) {
-    stepper.run();
-  }
+  waitStop(stepper);
 
   Serial.print(axisName);
   Serial.println(" homed OK");
@@ -357,6 +396,63 @@ void processCommand(String line) {
     return;
   }
 
+  // 诊断命令: $T 读限位状态, $TX/Y/Z 测试单轴正方向移动10mm
+  if (line.startsWith("$T") || line.startsWith("$t")) {
+    Serial.print("Limits: X(pin");
+    Serial.print(X_LIMIT_PIN);
+    Serial.print(")=");
+    Serial.print(digitalRead(X_LIMIT_PIN) == LOW ? "TRIGGERED" : "open");
+    Serial.print(" Y(pin");
+    Serial.print(Y_LIMIT_PIN);
+    Serial.print(")=");
+    Serial.print(digitalRead(Y_LIMIT_PIN) == LOW ? "TRIGGERED" : "open");
+    Serial.print(" Z(pin");
+    Serial.print(Z_LIMIT_PIN);
+    Serial.print(")=");
+    Serial.println(digitalRead(Z_LIMIT_PIN) == LOW ? "TRIGGERED" : "open");
+
+    // 单轴测试: $TX = X正方向10mm, $TZ- = Z负方向10mm
+    if (line.length() >= 3) {
+      char axis = line.charAt(2);
+      float dir = 1.0;
+      if (line.length() >= 4 && line.charAt(3) == '-') dir = -1.0;
+      float testDist = 10.0 * dir;
+      float speed = feedToStepsPerSec(200);
+
+      if (axis == 'X' || axis == 'x') {
+        Serial.print("Test X move ");
+        Serial.print(testDist);
+        Serial.println("mm (positive should go toward limit)");
+        stepperX.setMaxSpeed(speed);
+        stepperX.move(mmToSteps(testDist));
+        while (stepperX.distanceToGo() != 0) stepperX.run();
+      } else if (axis == 'Y' || axis == 'y') {
+        Serial.print("Test Y move ");
+        Serial.print(testDist);
+        Serial.println("mm");
+        stepperY.setMaxSpeed(speed);
+        stepperY.move(mmToSteps(testDist));
+        while (stepperY.distanceToGo() != 0) stepperY.run();
+      } else if (axis == 'Z' || axis == 'z') {
+        Serial.print("Test Z move ");
+        Serial.print(testDist);
+        Serial.println("mm (positive should go UP toward limit)");
+        stepperZ.setMaxSpeed(speed);
+        stepperZ.move(mmToSteps(testDist));
+        while (stepperZ.distanceToGo() != 0) stepperZ.run();
+      }
+      Serial.println("Test done. Check limits again:");
+      Serial.print("  X=");
+      Serial.print(digitalRead(X_LIMIT_PIN) == LOW ? "TRIGGERED" : "open");
+      Serial.print(" Y=");
+      Serial.print(digitalRead(Y_LIMIT_PIN) == LOW ? "TRIGGERED" : "open");
+      Serial.print(" Z=");
+      Serial.println(digitalRead(Z_LIMIT_PIN) == LOW ? "TRIGGERED" : "open");
+    }
+    Serial.println("ok");
+    return;
+  }
+
   // G-code
   if (line.charAt(0) == 'G' || line.charAt(0) == 'g') {
     int gCode = (int)parseValue(line, line.charAt(0), -1);
@@ -486,7 +582,8 @@ void setup() {
   attachInterrupt(Z_LIMIT_PIN, onZLimit, FALLING);
 
   Serial.println("XYZ Stepper Controller Ready");
-  Serial.println("Commands: $H(home) G0/G1(move) G90/G91 G92 M17/M18 ?(status)");
+  Serial.println("Commands: $H(home) $T(diag) G0/G1(move) G90/G91 G92 M17/M18 ?(status)");
+  Serial.println("Diag: $T(read limits) $TZ(test Z+10mm) $TZ-(test Z-10mm)");
 }
 
 // === Loop ===
