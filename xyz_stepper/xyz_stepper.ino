@@ -17,11 +17,11 @@
 // === 引脚定义 ===
 #define X_STEP_PIN    26
 #define X_DIR_PIN     16
-#define X_LIMIT_PIN   5   // X轴限位
+#define X_LIMIT_PIN   13  // X轴限位
 
 #define Y_STEP_PIN    25
 #define Y_DIR_PIN     27
-#define Y_LIMIT_PIN   13  // Y轴限位
+#define Y_LIMIT_PIN   5   // Y轴限位
 
 #define Z_STEP_PIN    17
 #define Z_DIR_PIN     14
