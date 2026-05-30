@@ -17,11 +17,11 @@
 // === 引脚定义 ===
 #define X_STEP_PIN    26
 #define X_DIR_PIN     16
-#define X_LIMIT_PIN   13  // 与FluidNC配置一致
+#define X_LIMIT_PIN   5   // X轴限位
 
 #define Y_STEP_PIN    25
 #define Y_DIR_PIN     27
-#define Y_LIMIT_PIN   5   // 与FluidNC配置一致
+#define Y_LIMIT_PIN   13  // Y轴限位
 
 #define Z_STEP_PIN    17
 #define Z_DIR_PIN     14
@@ -179,8 +179,10 @@ bool homeAxis(AccelStepper &stepper, int limitPin, float maxTravel, char axisNam
 
   {
     unsigned long lastPrint = 0;
+    unsigned long startTime = millis();
     while (true) {
       stepper.run();
+      yield();  // 防止看门狗复位
       // 先快速检查，只有读到LOW才做去抖确认
       if (digitalRead(limitPin) == LOW && confirmLimit(limitPin)) {
         Serial.println("  Seek: limit confirmed");
@@ -190,6 +192,15 @@ bool homeAxis(AccelStepper &stepper, int limitPin, float maxTravel, char axisNam
         Serial.print("Error: ");
         Serial.print(axisName);
         Serial.println(" limit not found");
+        return false;
+      }
+      // 超时保护：30秒未找到限位则停止
+      if (millis() - startTime > 30000) {
+        stepper.stop();
+        waitStop(stepper);
+        Serial.print("Error: ");
+        Serial.print(axisName);
+        Serial.println(" homing timeout (30s)");
         return false;
       }
       // 每500ms打印一次限位状态
@@ -221,6 +232,7 @@ bool homeAxis(AccelStepper &stepper, int limitPin, float maxTravel, char axisNam
 
   while (true) {
     stepper.run();
+    yield();
     if (digitalRead(limitPin) == LOW && confirmLimit(limitPin)) {
       Serial.println("  Feed: limit confirmed");
       break;
