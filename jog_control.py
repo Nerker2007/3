@@ -106,12 +106,24 @@ def main():
         ser = serial.Serial(port, BAUD_RATE, timeout=1, dsrdtr=False, rtscts=False)
         ser.dtr = False
         ser.rts = False
-        time.sleep(1)  # 等待连接稳定
+        print("等待ESP32启动...")
 
-        # 读取启动信息
-        while ser.in_waiting:
-            print(ser.read(ser.in_waiting).decode('utf-8', errors='ignore'), end='')
+        # 等待ESP32启动完成（最多10秒）
+        start = time.time()
+        boot_msg = ""
+        while time.time() - start < 10:
+            if ser.in_waiting:
+                boot_msg += ser.read(ser.in_waiting).decode('utf-8', errors='ignore')
+                if "Ready" in boot_msg:
+                    break
             time.sleep(0.1)
+
+        if boot_msg:
+            print(boot_msg.strip())
+
+        if "Ready" not in boot_msg:
+            print("警告: 未收到ESP32就绪信号，可能需要重新烧录固件")
+            print("继续尝试...")
 
     except serial.SerialException as e:
         print(f"串口打开失败: {e}")
